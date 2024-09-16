@@ -26,8 +26,9 @@ from cni.dlo import PCellWrapper
 # Creates the SG13_dev technology
 from .sg13_tech import *
 
+import pypreprocessor.pypreprocessor as preProcessor
+
 import pya
-import psutil
 
 import os
 import io
@@ -62,6 +63,57 @@ moduleNames = [
         'dpantenna_code'
 ]
 
+def getProcessList():
+    process = pya.QProcess()
+    
+    if sys.platform.startswith('linux'):
+        process.start('ps', ['-eo', 'pid,ppid,comm'])
+        process.waitForFinished()
+        output = process.readAllStandardOutput().decode()
+        
+        # Parse the output into a list of tuples (pid, ppid, command)
+        processList = []
+        for line in output.splitlines()[1:]:  # Skip the header
+            parts = line.split(None, 2)
+            processList.append((int(parts[0]), int(parts[1]), parts[2]))
+    
+    elif sys.platform.startswith('win'):
+        process.start('wmic', ['process', 'get', 'ProcessId,ParentProcessId,Name'])
+        process.waitForFinished()
+        output = process.readAllStandardOutput().decode()
+        
+        # Parse the output into a list of tuples (pid, ppid, name)
+        processList = []
+        for line in output.splitlines()[1:]:  # Skip the header
+            parts = line.split()
+            if len(parts) >= 3:
+                pid = int(parts[-1])
+                ppid = int(parts[-2])
+                name = ' '.join(parts[:-2])
+                processList.append((pid, ppid, name))
+    
+    else:
+        raise NotImplementedError("This script only supports Linux and Windows.")
+    
+    return processList
+
+def getProcessNames():
+    processNames = []
+    processList = getProcessList()
+    processDict = {pid: (ppid, name) for pid, ppid, name in processList}
+    currentPID = os.getpid()
+    maxDepth = 10
+    
+    while currentPID in processDict and maxDepth > 0:
+        maxDepth -= 1
+        pPID, name = processDict[currentPID]
+        processNames.append(name.lower())
+        if pPID == currentPID or pPID == 0:
+            break
+        currentPID = pPID
+
+    return processNames
+
 
 """
 Support for 'conditional compilation' in a C-style manner of PyCell code:
@@ -85,28 +137,14 @@ The list of names which are used in an #ifdef-statement and are considered as 'd
 if the environment variable 'IHP_PYCELL_LIB_PRINT_DEFINES_SET' is set.
 
 """
-
 class PyCellLib(pya.Library):
     def __init__(self):
         self.description = "IHP SG13G2 Pcells"
 
         tech = Tech.get('SG13_dev')
 
-        processNames = []
-        parent = None
-
-        p = psutil.Process()
-        with p.oneshot():
-            processNames.append(p.name().lower())
-            parent = p.parent()
-
-        maxDepth = 10;
-        while parent is not None and maxDepth > 0:
-            maxDepth -= 1
-            with parent.oneshot():
-                processNames.append(parent.name().lower())
-                parent = parent.parent()
-
+        processNames = getProcessNames()
+        
         if os.getenv('IHP_PYCELL_LIB_PRINT_PROCESS_TREE') is not None:
             processChain = ''
             isFirst = True
@@ -116,9 +154,6 @@ class PyCellLib(pya.Library):
                 processChain += "'" + processName + "'"
                 isFirst = False
             print(f'Current process chain: {processChain}')
-
-        module = importlib.import_module(f"{__name__}.ihp.pypreprocessor")
-        preProcessor = getattr(module, "preprocessor")
 
         definesSetToPrint = []
 
